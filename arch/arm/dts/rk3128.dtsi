@@ -473,7 +473,7 @@
 	};
 
 	usb_host_ehci: usb@101c0000 {
-		compatible = "generic-ehci";
+		compatible = "generic-ehci", "rockchip,rk3128-usb", "rockchip,rk3288-usb";
 		reg = <0x101c0000 0x20000>;
 		interrupts = <GIC_SPI 11 IRQ_TYPE_LEVEL_HIGH>;
 		phys = <&u2phy_host>;
@@ -482,7 +482,7 @@
 	};
 
 	usb_host_ohci: usb@101e0000 {
-		compatible = "generic-ohci";
+		compatible = "generic-ohci", "rockchip,rk3128-usb", "rockchip,rk3288-usb";
 		reg = <0x101e0000 0x20000>;
 		interrupts = <GIC_SPI 32 IRQ_TYPE_LEVEL_HIGH>;
 		phys = <&u2phy_host>;
@@ -918,7 +918,7 @@
 			sdmmc_pwren: sdmmc-pwren {
 				rockchip,pins = <1 RK_PB6 1 &pcfg_pull_default>;
 			};
-
+			
 			sdmmc_bus4: sdmmc-bus4 {
 				rockchip,pins = <1 RK_PC2 1 &pcfg_pull_default>,
 						<1 RK_PC3 1 &pcfg_pull_default>,

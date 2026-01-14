@@ -82,3 +82,25 @@
 	u-boot,dm-pre-reloc;
 	status = "okay";
 };
+
+&u2phy_host {
+	u-boot,dm-pre-reloc;
+	status = "okay";
+};
+
+&usb_host_ehci {
+	u-boot,dm-pre-reloc;
+	status = "okay";
+};
+
+&usb_host_ohci {
+	u-boot,dm-pre-reloc;
+	status = "okay";
+};
+
+
+&sdmmc {
+	u-boot,dm-pre-reloc;
+	status = "okay";
+};
+

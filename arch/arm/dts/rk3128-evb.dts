@@ -10,7 +10,7 @@
 #include "rk3128-u-boot.dtsi"
 
 / {
-	model = "Rockchip RK3128 Evaluation board";
+	model = "Rockchip RK3128 TVBox - By https://chieunhatnang.de";
 	compatible = "rockchip,rk3128-evb", "rockchip,rk3128";
 
 	vcc_sys: vcc-sys {
@@ -73,10 +73,12 @@
 };
 
 &usb_host_ehci {
+	vbus-supply = <&vcc5v0_host>;
 	status = "okay";
 };
 
 &usb_host_ohci {
+	vbus-supply = <&vcc5v0_host>;
 	status = "okay";
 };
 
@@ -85,6 +87,13 @@
 	status = "okay";
 };
 
+&sdmmc {
+	status = "okay";
+	no-1-8-v;
+	cap-sd-highspeed;
+	disable-wp;
+	non-removable;   /* force present in U-Boot */
+};
 &emmc {
 	fifo-mode;
 	status = "okay";
