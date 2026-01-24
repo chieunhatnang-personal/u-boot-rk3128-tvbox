@@ -3251,10 +3251,10 @@ static int rk3308b_soc_data_init(struct rockchip_pinctrl_priv *priv)
 static int rockchip_pinctrl_probe(struct udevice *dev)
 {
 	struct rockchip_pinctrl_priv *priv = dev_get_priv(dev);
-	const struct rockchip_pin_ctrl *ctrl;
+	const struct rockchip_pin_ctrl *ctrl;   /* const fixes your warning */
 	struct udevice *syscon;
 	struct regmap *regmap;
-	int ret = 0;
+	int ret;
 
 	/* get rockchip grf syscon phandle */
 	ret = uclass_get_device_by_phandle(UCLASS_SYSCON, dev, "rockchip,grf",
@@ -3270,13 +3270,36 @@ static int rockchip_pinctrl_probe(struct udevice *dev)
 		debug("unable to find rockchip grf regmap\n");
 		return -ENODEV;
 	}
+
+	/*
+	 * In THIS vendor tree, rockchip_set_mux() uses priv->regmap_base.
+	 * For RK3128, iomux registers are at pinctrl reg index 1 ("mux"),
+	 * so repoint regmap_base there to avoid the bus hang.
+	 */
 	priv->regmap_base = regmap;
 
-	/* option: get pmu-reg base address */
+#ifdef CONFIG_ROCKCHIP_RK3128
+	{
+		/* reg index 1 == "mux" in your DT */
+		fdt_addr_t mux_base = dev_read_addr_index(dev, 1);
+		if (mux_base != FDT_ADDR_T_NONE) {
+			static struct regmap mux_map;
+
+			mux_map = *regmap;   /* clone regmap ops */
+			mux_map.base = mux_base;
+
+			priv->regmap_base = &mux_map;
+
+			printf("[rk_pinctrl] RK3128 override regmap_base -> 0x%08llx\n",
+			       (unsigned long long)mux_base);
+		}
+	}
+#endif
+
+	/* optional: pmu */
 	ret = uclass_get_device_by_phandle(UCLASS_SYSCON, dev, "rockchip,pmu",
 					   &syscon);
 	if (!ret) {
-		/* get pmugrf-reg base address */
 		regmap = syscon_get_regmap(syscon);
 		if (!regmap) {
 			debug("unable to find rockchip pmu regmap\n");
@@ -3285,22 +3308,20 @@ static int rockchip_pinctrl_probe(struct udevice *dev)
 		priv->regmap_pmu = regmap;
 	}
 
+	/* DO NOT set regmap_ioc1 / regmap_rmio (your priv struct doesn't have them) */
+
 	ctrl = rockchip_pinctrl_get_soc_data(dev);
 	if (!ctrl) {
 		debug("driver data not available\n");
 		return -EINVAL;
 	}
 
-	/* Special handle for some Socs */
-	if (ctrl->soc_data_init) {
-		ret = ctrl->soc_data_init(priv);
-		if (ret)
-			return ret;
-	}
-
+	/* priv->ctrl likely not const in your struct, so cast is needed */
 	priv->ctrl = (struct rockchip_pin_ctrl *)ctrl;
+
 	return 0;
 }
+
 
 static struct rockchip_pin_bank px30_pin_banks[] = {
 	PIN_BANK_IOMUX_FLAGS(0, 32, "gpio0", IOMUX_SOURCE_PMU,

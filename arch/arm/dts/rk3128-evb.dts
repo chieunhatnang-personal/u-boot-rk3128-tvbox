@@ -88,12 +88,15 @@
 };
 
 &sdmmc {
-	status = "okay";
-	no-1-8-v;
-	cap-sd-highspeed;
-	disable-wp;
-	non-removable;   /* force present in U-Boot */
+    status = "okay";
+    bus-width = <4>;
+    disable-wp;
+    /* if no CD pin exists: */
+    broken-cd;
+    /* or sometimes: non-removable; (depends on driver expectations) */
+	pinctrl-0 = <&sdmmc_bus4>;
 };
+
 &emmc {
 	fifo-mode;
 	status = "okay";
