@@ -858,6 +858,17 @@ static int dwmci_get_cd(struct udevice *dev)
 	struct mmc *mmc = mmc_get_mmc_dev(dev);
 	struct dwmci_host *host = mmc->priv;
 
+	/* ---- SDMMC-only force-present when DT says no CD pin ---- */
+	if ((ulong)host->ioaddr == 0x10214000) { /* rk3128 sdmmc */
+		int broken = dev_read_bool(dev, "broken-cd") ||
+			     dev_read_bool(dev, "non-removable");
+		if (broken) {
+			printf("[sdmmc] get_cd: broken-cd/non-removable -> FORCE present\n");
+			return 1;
+		}
+	}
+	/* -------------------------------------------------------- */
+
 #if defined(CONFIG_DM_GPIO) && (defined(CONFIG_SPL_GPIO_SUPPORT) || !defined(CONFIG_SPL_BUILD))
 	struct gpio_desc detect;
 
@@ -871,10 +882,18 @@ static int dwmci_get_cd(struct udevice *dev)
 	return ret;
 dw_mmc_cdetect:
 #endif
+
+	/* fallback to DWMMC internal cdetect */
 	ret = (dwmci_readl(host, DWMCI_CDETECT) & (1 << 0)) == 0 ? 1 : 0;
+
+	/* optional debug */
+	if ((ulong)host->ioaddr == 0x10214000)
+		printf("[sdmmc] get_cd: CDETECT=0x%08x -> %d\n",
+		       dwmci_readl(host, DWMCI_CDETECT), ret);
 
 	return ret;
 }
+
 
 #ifdef CONFIG_DM_MMC
 int dwmci_probe(struct udevice *dev)
