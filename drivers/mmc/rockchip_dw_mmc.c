@@ -50,6 +50,12 @@ struct rockchip_dwmmc_priv {
 	u32 minmax[2];
 };
 
+static int has_prop(struct udevice *dev, const char *name)
+{
+	int len;
+	return dev_read_prop(dev, name, &len) != NULL;
+}
+
 #ifdef CONFIG_USING_KERNEL_DTB
 int board_mmc_dm_reinit(struct udevice *dev)
 {
@@ -458,6 +464,45 @@ internal_phase:
 	host->mmc->priv = &priv->host;
 	host->mmc->dev = dev;
 	upriv->mmc = host->mmc;
+
+	/* Force PWREN only for RK312x SDMMC when no regulators are described */
+	if (device_is_compatible(dev, "rockchip,rk312x-dw-mshc") ||
+	    device_is_compatible(dev, "rockchip,rk3128-dw-mshc")) {
+
+		u32 pwren = dwmci_readl(host, DWMCI_PWREN);
+
+		if (!has_prop(dev, "vmmc-supply") &&
+		    !has_prop(dev, "vqmmc-supply") &&
+		    pwren == 0) {
+
+			printf("[dwmmc] %s: rk312x force PWREN=1 (no vmmc/vqmmc)\n",
+			       dev->name);
+			dwmci_writel(host, DWMCI_PWREN, 1);
+			udelay(1000);
+		}
+	}
+
+	if ((ulong)host->ioaddr == 0x10214000) {
+		u32 ctrl, pwren, clkdiv, clkena, cmd, ctype, status;
+
+		printf("[sdmmc] ioaddr=%p\n", host->ioaddr);
+
+		ctrl   = dwmci_readl(host, DWMCI_CTRL);
+		pwren  = dwmci_readl(host, DWMCI_PWREN);
+		clkdiv = dwmci_readl(host, DWMCI_CLKDIV);
+		clkena = dwmci_readl(host, DWMCI_CLKENA);
+		cmd    = dwmci_readl(host, DWMCI_CMD);
+		ctype  = dwmci_readl(host, DWMCI_CTYPE);
+		status = dwmci_readl(host, DWMCI_STATUS);
+
+		printf("[sdmmc] regs: CTRL=%08x PWREN=%08x CLKDIV=%08x CLKENA=%08x CMD=%08x CTYPE=%08x STATUS=%08x\n",
+		       ctrl, pwren, clkdiv, clkena, cmd, ctype, status);
+
+		printf("[sdmmc] get_mmc_clk(400k)=%u get_mmc_clk(25M)=%u\n",
+		       host->get_mmc_clk ? host->get_mmc_clk(host, 400000) : 0,
+		       host->get_mmc_clk ? host->get_mmc_clk(host, 25000000) : 0);
+	}
+
 
 	return dwmci_probe(dev);
 }
