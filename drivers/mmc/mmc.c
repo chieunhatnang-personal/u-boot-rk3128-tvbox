@@ -21,6 +21,7 @@
 #include <linux/list.h>
 #include <div64.h>
 #include "mmc_private.h"
+#include <asm/io.h>
 
 static const unsigned int sd_au_size[] = {
 	0,		SZ_16K / 512,		SZ_32K / 512,
@@ -2499,3 +2500,37 @@ int mmc_set_bkops_enable(struct mmc *mmc)
 	return 0;
 }
 #endif
+
+// [CNN modded] Add mmcdump command
+static void mmc_dump_dwmmc_regs(ulong base)
+{
+#define R(off) readl((void *)(base + (off)))
+	printf("DWMMC @%08lx\n", base);
+	printf("  CDETECT  = %08x\n", R(0x050));
+	printf("  PWREN    = %08x\n", R(0x004));
+	printf("  CLKDIV   = %08x\n", R(0x008));
+	printf("  CLKENA   = %08x\n", R(0x010));
+	printf("  CTYPE    = %08x\n", R(0x018));
+	printf("  BLKSIZ   = %08x\n", R(0x01c));
+	printf("  BYTCNT   = %08x\n", R(0x020));
+	printf("  INTMASK  = %08x\n", R(0x024));
+	printf("  MINTSTS  = %08x\n", R(0x028));
+	printf("  RINTSTS  = %08x\n", R(0x044));
+	printf("  STATUS   = %08x\n", R(0x048));
+	printf("  CMD      = %08x\n", R(0x02c));
+	printf("  RESP0    = %08x\n", R(0x030));
+#undef R
+}
+
+static int do_mmcdump(cmd_tbl_t *cmdtp, int flag, int argc, char *const argv[])
+{
+	mmc_dump_dwmmc_regs(0x10214000);
+	mmc_dump_dwmmc_regs(0x1021c000);
+	return 0;
+}
+
+U_BOOT_CMD(
+	mmcdump, 1, 1, do_mmcdump,
+	"[CNN Modded]dump DWMMC regs for rk3128 (sdmmc/emmc)",
+	""
+);
