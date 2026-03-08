@@ -378,6 +378,17 @@
 			"fi; "                                            \
 		"done\0"                                                  \
 	\
+	"scan_dev_for_boot_part_no_check_bootable_flag="                                         \
+		"part list ${devtype} ${devnum} devplist; "     \
+		"env exists devplist || setenv devplist 1; "              \
+		"for distro_bootpart in ${devplist}; do "                 \
+			"if fstype ${devtype} "                           \
+					"${devnum}:${distro_bootpart} "   \
+					"bootfstype; then "               \
+				"run scan_dev_for_boot; "                 \
+			"fi; "                                            \
+			"done\0"                                                  \
+	\
 	BOOT_TARGET_DEVICES(BOOTENV_DEV)                                  \
 	\
 	"distro_bootcmd=" BOOTENV_SET_SCSI_NEED_INIT                      \

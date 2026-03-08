@@ -34,7 +34,11 @@
 #include <config_distro_defaults.h>
 
 #ifdef CONFIG_CMD_RKNAND
-#define BOOTENV_SHARED_RKNAND	BOOTENV_SHARED_BLKDEV(rknand)
+#define BOOTENV_SHARED_RKNAND				\
+	"rknand_boot="					\
+		"setenv devtype rknand; "		\
+		"setenv devnum 0; "			\
+		"run scan_dev_for_boot_part_no_check_bootable_flag\0"
 #define BOOTENV_DEV_RKNAND		BOOTENV_DEV_BLKDEV
 #define BOOTENV_DEV_NAME_RKNAND	BOOTENV_DEV_NAME_BLKDEV
 #else
