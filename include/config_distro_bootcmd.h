@@ -327,6 +327,12 @@
 	"boot_script_dhcp=boot.scr.uimg\0" \
 	BOOTENV_BOOT_TARGETS \
 	\
+	"set_distro_bootpart="                                           \
+		"setenv partnum ${distro_bootpart}; "                   \
+		"setenv rootpartname; "                                 \
+		"part name ${devtype} ${devnum} "                       \
+			"${distro_bootpart} rootpartname\0"             \
+	\
 	"boot_extlinux="                                                  \
 		"sysboot ${devtype} ${devnum}:${distro_bootpart} any "    \
 			"${scriptaddr} ${prefix}extlinux/extlinux.conf\0" \
@@ -335,6 +341,7 @@
 		"if test -e ${devtype} "                                  \
 				"${devnum}:${distro_bootpart} "           \
 				"${prefix}extlinux/extlinux.conf; then "  \
+			"run set_distro_bootpart; "                     \
 			"echo Found ${prefix}extlinux/extlinux.conf; "    \
 			"run boot_extlinux; "                             \
 			"echo SCRIPT FAILED: continuing...; "             \
@@ -350,6 +357,7 @@
 			"if test -e ${devtype} "                          \
 					"${devnum}:${distro_bootpart} "   \
 					"${prefix}${script}; then "       \
+				"run set_distro_bootpart; "             \
 				"echo Found U-Boot script "               \
 					"${prefix}${script}; "            \
 				"run boot_a_script; "                     \

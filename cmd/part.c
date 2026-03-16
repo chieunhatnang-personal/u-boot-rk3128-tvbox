@@ -176,6 +176,37 @@ static int do_part_size(int argc, char * const argv[])
 	return 0;
 }
 
+static int do_part_name(int argc, char * const argv[])
+{
+	struct blk_desc *desc;
+	disk_partition_t info;
+	int part;
+	int err;
+	int ret;
+
+	if (argc < 3)
+		return CMD_RET_USAGE;
+	if (argc > 4)
+		return CMD_RET_USAGE;
+
+	part = simple_strtoul(argv[2], NULL, 0);
+
+	ret = blk_get_device_by_str(argv[0], argv[1], &desc);
+	if (ret < 0)
+		return 1;
+
+	err = part_get_info(desc, part, &info);
+	if (err)
+		return 1;
+
+	if (argc > 3)
+		env_set(argv[3], (char *)info.name);
+	else
+		printf("%s\n", info.name);
+
+	return 0;
+}
+
 static int do_part(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
 {
 	if (argc < 2)
@@ -189,6 +220,8 @@ static int do_part(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
 		return do_part_start(argc - 2, argv + 2);
 	else if (!strcmp(argv[1], "size"))
 		return do_part_size(argc - 2, argv + 2);
+	else if (!strcmp(argv[1], "name"))
+		return do_part_name(argc - 2, argv + 2);
 
 	return CMD_RET_USAGE;
 }
@@ -208,5 +241,7 @@ U_BOOT_CMD(
 	"part start <interface> <dev> <part> <varname>\n"
 	"    - set environment variable to the start of the partition (in blocks)\n"
 	"part size <interface> <dev> <part> <varname>\n"
-	"    - set environment variable to the size of the partition (in blocks)"
+	"    - set environment variable to the size of the partition (in blocks)\n"
+	"part name <interface> <dev> <part> <varname>\n"
+	"    - set environment variable to the partition name"
 );

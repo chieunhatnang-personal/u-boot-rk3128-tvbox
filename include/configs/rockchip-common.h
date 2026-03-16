@@ -91,7 +91,9 @@
 #endif
 
 #if CONFIG_IS_ENABLED(CMD_USB)
-	#define BOOT_TARGET_USB(func) func(USB, usb, 0)
+	#define BOOT_TARGET_USB(func) \
+		func(USB, usb, 0) \
+		func(USB, usb, 1)
 #else
 	#define BOOT_TARGET_USB(func)
 #endif
