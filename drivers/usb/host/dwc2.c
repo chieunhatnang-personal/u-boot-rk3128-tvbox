@@ -29,28 +29,39 @@ DECLARE_GLOBAL_DATA_PTR;
 
 #define DWC2_STATUS_BUF_SIZE		64
 #define DWC2_DATA_BUF_SIZE		(CONFIG_USB_DWC2_BUFFER_SIZE * 1024)
+#define DWC2_HCFIFO_OFFSET		0x1000
+#define DWC2_HCFIFO_SIZE		0x1000
+#define DWC2_ROCKCHIP_BULK_CHUNK_SIZE	(4 * 512)
+#define DWC2_ROCKCHIP_BULK_XFER_SIZE	(64 * 512)
+#define DWC2_BULK_ERROR_RETRIES		3
+
+#define DWC2_GRXSTS_PKTSTS_HCHIN		2
+#define DWC2_GRXSTS_PKTSTS_HCHIN_XFER_COMP	3
+#define DWC2_GRXSTS_PKTSTS_DATATOGGLEERR	5
+#define DWC2_GRXSTS_PKTSTS_HCHHALTED		7
 
 #define MAX_DEVICE			16
 #define MAX_ENDPOINT			16
 
 struct dwc2_priv {
+	uint8_t *aligned_buffer;
+	uint8_t *status_buffer;
 #if CONFIG_IS_ENABLED(DM_USB)
-	uint8_t aligned_buffer[DWC2_DATA_BUF_SIZE] __aligned(ARCH_DMA_MINALIGN);
-	uint8_t status_buffer[DWC2_STATUS_BUF_SIZE] __aligned(ARCH_DMA_MINALIGN);
 #ifdef CONFIG_DM_REGULATOR
 	struct udevice *vbus_supply;
 #endif
 	struct phy phy;
 	struct clk_bulk clks;
-#else
-	uint8_t *aligned_buffer;
-	uint8_t *status_buffer;
 #endif
 	u8 in_data_toggle[MAX_DEVICE][MAX_ENDPOINT];
 	u8 out_data_toggle[MAX_DEVICE][MAX_ENDPOINT];
 	struct dwc2_core_regs *regs;
 	int root_hub_devnum;
 	bool ext_vbus;
+	bool rockchip_host_params;
+	bool bulk_force_pio;
+	bool bulk_single_packet;
+	bool use_dma;
 	/*
 	 * The hnp/srp capability must be disabled if the platform
 	 * does't support hnp/srp. Otherwise the force mode can't work.
@@ -241,10 +252,26 @@ static int dwc_vbus_supply_exit(struct udevice *dev)
 static void dwc_otg_core_host_init(struct udevice *dev,
 				   struct dwc2_core_regs *regs)
 {
+	struct dwc2_priv *priv;
 	uint32_t nptxfifosize = 0;
 	uint32_t ptxfifosize = 0;
 	uint32_t hprt0 = 0;
+	uint32_t host_rx_fifo_size = CONFIG_DWC2_HOST_RX_FIFO_SIZE;
+	uint32_t host_nperio_tx_fifo_size = CONFIG_DWC2_HOST_NPERIO_TX_FIFO_SIZE;
+	uint32_t host_perio_tx_fifo_size = CONFIG_DWC2_HOST_PERIO_TX_FIFO_SIZE;
 	int i, ret, num_channels;
+
+#if CONFIG_IS_ENABLED(DM_USB)
+	priv = dev_get_priv(dev);
+#else
+	priv = &local;
+#endif
+
+	if (priv->rockchip_host_params) {
+		host_rx_fifo_size = 525;
+		host_nperio_tx_fifo_size = 128;
+		host_perio_tx_fifo_size = 256;
+	}
 
 	/* Restart the Phy Clock */
 	writel(0, &regs->pcgcctl);
@@ -259,20 +286,20 @@ static void dwc_otg_core_host_init(struct udevice *dev,
 #ifdef CONFIG_DWC2_ENABLE_DYNAMIC_FIFO
 	if (readl(&regs->ghwcfg2) & DWC2_HWCFG2_DYNAMIC_FIFO) {
 		/* Rx FIFO */
-		writel(CONFIG_DWC2_HOST_RX_FIFO_SIZE, &regs->grxfsiz);
+		writel(host_rx_fifo_size, &regs->grxfsiz);
 
 		/* Non-periodic Tx FIFO */
-		nptxfifosize |= CONFIG_DWC2_HOST_NPERIO_TX_FIFO_SIZE <<
+		nptxfifosize |= host_nperio_tx_fifo_size <<
 				DWC2_FIFOSIZE_DEPTH_OFFSET;
-		nptxfifosize |= CONFIG_DWC2_HOST_RX_FIFO_SIZE <<
+		nptxfifosize |= host_rx_fifo_size <<
 				DWC2_FIFOSIZE_STARTADDR_OFFSET;
 		writel(nptxfifosize, &regs->gnptxfsiz);
 
 		/* Periodic Tx FIFO */
-		ptxfifosize |= CONFIG_DWC2_HOST_PERIO_TX_FIFO_SIZE <<
+		ptxfifosize |= host_perio_tx_fifo_size <<
 				DWC2_FIFOSIZE_DEPTH_OFFSET;
-		ptxfifosize |= (CONFIG_DWC2_HOST_RX_FIFO_SIZE +
-				CONFIG_DWC2_HOST_NPERIO_TX_FIFO_SIZE) <<
+		ptxfifosize |= (host_rx_fifo_size +
+				host_nperio_tx_fifo_size) <<
 				DWC2_FIFOSIZE_STARTADDR_OFFSET;
 		writel(ptxfifosize, &regs->hptxfsiz);
 	}
@@ -458,14 +485,19 @@ static void dwc_otg_core_init(struct dwc2_priv *priv)
 		}
 
 #ifdef CONFIG_DWC2_DMA_ENABLE
-		ahbcfg |= DWC2_GAHBCFG_DMAENABLE;
+		if (priv->use_dma)
+			ahbcfg |= DWC2_GAHBCFG_DMAENABLE;
 #endif
 		break;
 
 	case DWC2_HWCFG2_ARCHITECTURE_INT_DMA:
-		ahbcfg |= DWC2_GAHBCFG_HBURSTLEN_INCR4;
+		if (priv->rockchip_host_params)
+			ahbcfg |= DWC2_GAHBCFG_HBURSTLEN_INCR16;
+		else
+			ahbcfg |= DWC2_GAHBCFG_HBURSTLEN_INCR4;
 #ifdef CONFIG_DWC2_DMA_ENABLE
-		ahbcfg |= DWC2_GAHBCFG_DMAENABLE;
+		if (priv->use_dma)
+			ahbcfg |= DWC2_GAHBCFG_DMAENABLE;
 #endif
 		break;
 	}
@@ -842,9 +874,194 @@ int wait_for_chhltd(struct dwc2_hc_regs *hc_regs, uint32_t *sub, u8 *toggle)
 	if (hcint & DWC2_HCINT_XFERCOMP)
 		return 0;
 
-	if (hcint & (DWC2_HCINT_NAK | DWC2_HCINT_FRMOVRUN))
+	if (hcint & (DWC2_HCINT_NAK | DWC2_HCINT_NYET |
+		     DWC2_HCINT_FRMOVRUN))
 		return -EAGAIN;
+	if (hcint & DWC2_HCINT_STALL)
+		return -EPIPE;
+	if (hcint & (DWC2_HCINT_AHBERR | DWC2_HCINT_XACTERR |
+		     DWC2_HCINT_BBLERR | DWC2_HCINT_DATATGLERR))
+		return -EPROTO;
 
+	debug("%s: Error (HCINT=%08x)\n", __func__, hcint);
+	return -EIO;
+}
+
+static void dwc2_recover_bulk_channel(struct dwc2_priv *priv)
+{
+	struct dwc2_core_regs *regs = priv->regs;
+	struct dwc2_hc_regs *hc_regs = &regs->hc_regs[DWC2_HC_CHANNEL];
+	u32 hcchar;
+
+	writel(0, &hc_regs->hcintmsk);
+	writel(0xFFFFFFFF, &hc_regs->hcint);
+
+	hcchar = readl(&hc_regs->hcchar);
+	if (hcchar & DWC2_HCCHAR_CHEN) {
+		hcchar |= DWC2_HCCHAR_CHEN | DWC2_HCCHAR_CHDIS;
+		writel(hcchar, &hc_regs->hcchar);
+		wait_for_bit_le32(&hc_regs->hcchar, DWC2_HCCHAR_CHEN,
+				  false, 1000, false);
+	}
+
+	dwc_otg_flush_tx_fifo(regs, 0x10);
+	dwc_otg_flush_rx_fifo(regs);
+	writel(0xFFFFFFFF, &hc_regs->hcint);
+}
+
+static u32 *dwc2_get_hc_fifo(struct dwc2_core_regs *regs, uint8_t hc_num)
+{
+	return (u32 *)((u8 *)regs + DWC2_HCFIFO_OFFSET +
+		       DWC2_HCFIFO_SIZE * hc_num);
+}
+
+static void dwc2_read_packet(struct dwc2_priv *priv, uint8_t hc_num,
+			     void *buffer, u16 bytes)
+{
+	u8 *buf = buffer;
+	u32 *fifo = dwc2_get_hc_fifo(priv->regs, hc_num);
+	int word_count = DIV_ROUND_UP(bytes, 4);
+	int i;
+
+	for (i = 0; i < word_count; i++) {
+		u32 data = readl(fifo);
+		int offset = i * 4;
+		int copy = min(4, (int)bytes - offset);
+
+		memcpy(buf + offset, &data, copy);
+	}
+}
+
+static void dwc2_write_packet(struct dwc2_priv *priv, uint8_t hc_num,
+			      const void *buffer, u16 bytes)
+{
+	const u8 *buf = buffer;
+	u32 *fifo = dwc2_get_hc_fifo(priv->regs, hc_num);
+	int word_count = DIV_ROUND_UP(bytes, 4);
+	int i;
+
+	for (i = 0; i < word_count; i++) {
+		u32 data = 0;
+		int offset = i * 4;
+		int copy = min(4, (int)bytes - offset);
+
+		memcpy(&data, buf + offset, copy);
+		writel(data, fifo);
+	}
+}
+
+static int dwc2_handle_slave_rx(struct dwc2_priv *priv, uint8_t hc_num,
+				void *buffer, int xfer_len, int *actual_len)
+{
+	struct dwc2_core_regs *regs = priv->regs;
+
+	while (readl(&regs->gintsts) & DWC2_GINTSTS_RXSTSQLVL) {
+		u32 grxsts = readl(&regs->grxstsp);
+		u32 bcnt = (grxsts & DWC2_GRXSTS_BCNT_MASK) >>
+			   DWC2_GRXSTS_BCNT_OFFSET;
+		u32 pktsts = (grxsts & DWC2_GRXSTS_PKTSTS_MASK) >>
+			     DWC2_GRXSTS_PKTSTS_OFFSET;
+
+		switch (pktsts) {
+		case DWC2_GRXSTS_PKTSTS_HCHIN:
+			if (!bcnt)
+				break;
+			if (!buffer || (*actual_len + bcnt) > xfer_len) {
+				dwc2_read_packet(priv, hc_num,
+						 priv->aligned_buffer, bcnt);
+				debug("%s: RX overflow (bcnt=%u actual=%d len=%d)\n",
+				      __func__, bcnt, *actual_len, xfer_len);
+				return -EINVAL;
+			}
+
+			dwc2_read_packet(priv, hc_num,
+					 (u8 *)buffer + *actual_len, bcnt);
+			*actual_len += bcnt;
+			break;
+		case DWC2_GRXSTS_PKTSTS_HCHIN_XFER_COMP:
+		case DWC2_GRXSTS_PKTSTS_DATATOGGLEERR:
+		case DWC2_GRXSTS_PKTSTS_HCHHALTED:
+			break;
+		default:
+			debug("%s: Unhandled GRXSTS=%08x\n", __func__, grxsts);
+			break;
+		}
+	}
+
+	return 0;
+}
+
+static int dwc2_halt_channel_slave(struct dwc2_hc_regs *hc_regs)
+{
+	u32 hcchar;
+	int ret;
+
+	hcchar = readl(&hc_regs->hcchar);
+	hcchar |= DWC2_HCCHAR_CHEN | DWC2_HCCHAR_CHDIS;
+	writel(hcchar, &hc_regs->hcchar);
+
+	ret = wait_for_bit_le32(&hc_regs->hcint, DWC2_HCINT_CHHLTD, true,
+				1000, false);
+	if (ret)
+		debug("%s: timed out waiting for CHHLTD\n", __func__);
+
+	return ret;
+}
+
+static int wait_for_chhltd_slave(struct dwc2_priv *priv,
+				 struct dwc2_hc_regs *hc_regs,
+				 uint32_t *sub, u8 *toggle, void *buffer,
+				 int xfer_len, int *actual_len)
+{
+	unsigned long timeout;
+	uint32_t hcint, hctsiz;
+	int ret;
+
+	timeout = get_timer(0) + 5000;
+	for (;;) {
+		ret = dwc2_handle_slave_rx(priv, DWC2_HC_CHANNEL, buffer,
+					   xfer_len, actual_len);
+		if (ret)
+			return ret;
+
+		hcint = readl(&hc_regs->hcint);
+		if (hcint & (DWC2_HCINT_XFERCOMP | DWC2_HCINT_NAK |
+			     DWC2_HCINT_STALL | DWC2_HCINT_NYET |
+			     DWC2_HCINT_XACTERR | DWC2_HCINT_BBLERR |
+			     DWC2_HCINT_FRMOVRUN |
+			     DWC2_HCINT_DATATGLERR))
+			break;
+
+		if (get_timer(0) > timeout)
+			return -ETIMEDOUT;
+	}
+
+	ret = dwc2_handle_slave_rx(priv, DWC2_HC_CHANNEL, buffer, xfer_len,
+				   actual_len);
+	if (ret)
+		return ret;
+
+	hcint = readl(&hc_regs->hcint);
+	hctsiz = readl(&hc_regs->hctsiz);
+	*sub = (hctsiz & DWC2_HCTSIZ_XFERSIZE_MASK) >>
+		DWC2_HCTSIZ_XFERSIZE_OFFSET;
+	*toggle = (hctsiz & DWC2_HCTSIZ_PID_MASK) >> DWC2_HCTSIZ_PID_OFFSET;
+
+	debug("%s: HCINT=%08x sub=%u toggle=%d actual=%d\n", __func__,
+	      hcint, *sub, *toggle, *actual_len);
+
+	if (hcint & DWC2_HCINT_XFERCOMP) {
+		if (buffer && dwc2_halt_channel_slave(hc_regs))
+			return -ETIMEDOUT;
+		return 0;
+	}
+
+	if (hcint & (DWC2_HCINT_NAK | DWC2_HCINT_FRMOVRUN)) {
+		dwc2_halt_channel_slave(hc_regs);
+		return -EAGAIN;
+	}
+
+	dwc2_halt_channel_slave(hc_regs);
 	debug("%s: Error (HCINT=%08x)\n", __func__, hcint);
 	return -EINVAL;
 }
@@ -856,9 +1073,10 @@ static int dwc2_eptype[] = {
 	DWC2_HCCHAR_EPTYPE_BULK,
 };
 
-static int transfer_chunk(struct dwc2_hc_regs *hc_regs, void *aligned_buffer,
-			  u8 *pid, int in, void *buffer, int num_packets,
-			  int xfer_len, int *actual_len, int odd_frame)
+static int transfer_chunk(struct dwc2_priv *priv, struct dwc2_hc_regs *hc_regs,
+			  void *aligned_buffer, u8 *pid, int in, void *buffer,
+			  int num_packets, int xfer_len, int *actual_len,
+			  int odd_frame, bool use_dma)
 {
 	int ret = 0;
 	uint32_t sub;
@@ -871,7 +1089,7 @@ static int transfer_chunk(struct dwc2_hc_regs *hc_regs, void *aligned_buffer,
 	       (*pid << DWC2_HCTSIZ_PID_OFFSET),
 	       &hc_regs->hctsiz);
 
-	if (xfer_len) {
+	if (use_dma && xfer_len) {
 		if (in) {
 			invalidate_dcache_range(
 					(uintptr_t)aligned_buffer,
@@ -886,7 +1104,8 @@ static int transfer_chunk(struct dwc2_hc_regs *hc_regs, void *aligned_buffer,
 		}
 	}
 
-	writel(phys_to_bus((unsigned long)aligned_buffer), &hc_regs->hcdma);
+	if (use_dma)
+		writel(phys_to_bus((unsigned long)aligned_buffer), &hc_regs->hcdma);
 
 	/* Clear old interrupt conditions for this host channel. */
 	writel(0x3fff, &hc_regs->hcint);
@@ -899,11 +1118,21 @@ static int transfer_chunk(struct dwc2_hc_regs *hc_regs, void *aligned_buffer,
 			(odd_frame << DWC2_HCCHAR_ODDFRM_OFFSET) |
 			DWC2_HCCHAR_CHEN);
 
-	ret = wait_for_chhltd(hc_regs, &sub, pid);
+	if (!use_dma && xfer_len && !in)
+		dwc2_write_packet(priv, DWC2_HC_CHANNEL, buffer, xfer_len);
+
+	if (use_dma) {
+		ret = wait_for_chhltd(hc_regs, &sub, pid);
+	} else {
+		*actual_len = 0;
+		ret = wait_for_chhltd_slave(priv, hc_regs, &sub, pid,
+					    in ? buffer : NULL, xfer_len,
+					    actual_len);
+	}
 	if (ret < 0)
 		return ret;
 
-	if (in) {
+	if (use_dma && in) {
 		xfer_len -= sub;
 
 		invalidate_dcache_range((unsigned long)aligned_buffer,
@@ -911,8 +1140,10 @@ static int transfer_chunk(struct dwc2_hc_regs *hc_regs, void *aligned_buffer,
 					roundup(xfer_len, ARCH_DMA_MINALIGN));
 
 		memcpy(buffer, aligned_buffer, xfer_len);
+		*actual_len = xfer_len;
+	} else if (!in) {
+		*actual_len = xfer_len - sub;
 	}
-	*actual_len = xfer_len;
 
 	return ret;
 }
@@ -936,15 +1167,30 @@ int chunk_msg(struct dwc2_priv *priv, struct usb_device *dev,
 	int stop_transfer = 0;
 	uint32_t max_xfer_len;
 	int ssplit_frame_num = 0;
+	bool use_dma;
 
 	debug("%s: msg: pipe %lx pid %d in %d len %d\n", __func__, pipe, *pid,
 	      in, len);
+
+	use_dma = priv->use_dma;
+	if (priv->bulk_force_pio &&
+	    eptype == DWC2_HCCHAR_EPTYPE_BULK)
+		use_dma = false;
 
 	max_xfer_len = CONFIG_DWC2_MAX_PACKET_COUNT * max;
 	if (max_xfer_len > CONFIG_DWC2_MAX_TRANSFER_SIZE)
 		max_xfer_len = CONFIG_DWC2_MAX_TRANSFER_SIZE;
 	if (max_xfer_len > DWC2_DATA_BUF_SIZE)
 		max_xfer_len = DWC2_DATA_BUF_SIZE;
+	if (priv->rockchip_host_params && use_dma &&
+	    eptype == DWC2_HCCHAR_EPTYPE_BULK &&
+	    max_xfer_len > DWC2_ROCKCHIP_BULK_CHUNK_SIZE)
+		max_xfer_len = DWC2_ROCKCHIP_BULK_CHUNK_SIZE;
+	if (priv->bulk_single_packet &&
+	    eptype == DWC2_HCCHAR_EPTYPE_BULK)
+		max_xfer_len = max;
+	if (!use_dma)
+		max_xfer_len = max;
 
 	/* Make sure that max_xfer_len is a multiple of max packet size. */
 	num_packets = max_xfer_len / max;
@@ -995,9 +1241,9 @@ int chunk_msg(struct dwc2_priv *priv, struct usb_device *dev,
 				odd_frame = 1;
 		}
 
-		ret = transfer_chunk(hc_regs, priv->aligned_buffer, pid,
+		ret = transfer_chunk(priv, hc_regs, priv->aligned_buffer, pid,
 				     in, (char *)buffer + done, num_packets,
-				     xfer_len, &actual_len, odd_frame);
+				     xfer_len, &actual_len, odd_frame, use_dma);
 
 		hcint = readl(&hc_regs->hcint);
 		if (complete_split) {
@@ -1062,6 +1308,51 @@ int _submit_bulk_msg(struct dwc2_priv *priv, struct usb_device *dev,
 		pid = &priv->out_data_toggle[devnum][ep];
 
 	return chunk_msg(priv, dev, pipe, pid, usb_pipein(pipe), buffer, len);
+}
+
+static int dwc2_bulk_msg(struct dwc2_priv *priv, struct usb_device *dev,
+			 unsigned long pipe, void *buffer, int len)
+{
+	u8 *ptr = buffer;
+	unsigned long timeout;
+	int act_len = 0;
+	int retries = 0;
+	int ret;
+
+	timeout = get_timer(0) + USB_TIMEOUT_MS(pipe);
+	do {
+		ret = _submit_bulk_msg(priv, dev, pipe, ptr, len);
+		act_len += dev->act_len;
+
+		if (ret == -EAGAIN) {
+			ptr += dev->act_len;
+			len -= dev->act_len;
+			continue;
+		}
+
+		if (priv->rockchip_host_params &&
+		    (ret == -ETIMEDOUT || ret == -EPROTO) &&
+		    retries < DWC2_BULK_ERROR_RETRIES &&
+		    get_timer(0) <= timeout) {
+			ptr += dev->act_len;
+			len -= dev->act_len;
+			dwc2_recover_bulk_channel(priv);
+			if (dev->act_len)
+				retries = 0;
+			else
+				retries++;
+			continue;
+		}
+
+		break;
+	} while (len > 0 && get_timer(0) <= timeout);
+
+	if (ret == -EAGAIN)
+		return -ETIMEDOUT;
+
+	dev->act_len = act_len;
+
+	return ret;
 }
 
 static int _submit_control_msg(struct dwc2_priv *priv, struct usb_device *dev,
@@ -1252,7 +1543,7 @@ int submit_control_msg(struct usb_device *dev, unsigned long pipe, void *buffer,
 int submit_bulk_msg(struct usb_device *dev, unsigned long pipe, void *buffer,
 		    int len)
 {
-	return _submit_bulk_msg(&local, dev, pipe, buffer, len);
+	return dwc2_bulk_msg(&local, dev, pipe, buffer, len);
 }
 
 int submit_int_msg(struct usb_device *dev, unsigned long pipe, void *buffer,
@@ -1272,6 +1563,7 @@ int usb_lowlevel_init(int index, enum usb_init_type init, void **controller)
 	priv->regs = (struct dwc2_core_regs *)CONFIG_USB_DWC2_REG_ADDR;
 	priv->aligned_buffer = aligned_buffer_addr;
 	priv->status_buffer = status_buffer_addr;
+	priv->use_dma = true;
 
 	/* board-dependant init */
 	if (board_usb_init(index, USB_INIT_HOST))
@@ -1308,7 +1600,7 @@ static int dwc2_submit_bulk_msg(struct udevice *dev, struct usb_device *udev,
 
 	debug("%s: dev='%s', udev=%p\n", __func__, dev->name, udev);
 
-	return _submit_bulk_msg(priv, udev, pipe, buffer, length);
+	return dwc2_bulk_msg(priv, udev, pipe, buffer, length);
 }
 
 static int dwc2_submit_int_msg(struct udevice *dev, struct usb_device *udev,
@@ -1335,6 +1627,14 @@ static int dwc2_usb_ofdata_to_platdata(struct udevice *dev)
 
 	priv->oc_disable = dev_read_bool(dev, "disable-over-current");
 	priv->hnp_srp_disable = dev_read_bool(dev, "hnp-srp-disable");
+	priv->rockchip_host_params =
+		device_is_compatible(dev, "rockchip,rk3066-usb") ||
+		device_is_compatible(dev, "rockchip,rk3128-usb");
+	priv->bulk_force_pio =
+		dev_read_bool(dev, "u-boot,bulk-force-pio");
+	priv->bulk_single_packet =
+		dev_read_bool(dev, "u-boot,bulk-single-packet");
+	priv->use_dma = !dev_read_bool(dev, "disable-dma");
 
 	return 0;
 }
@@ -1412,6 +1712,46 @@ static int dwc2_clk_init(struct udevice *dev)
 	return 0;
 }
 
+static int dwc2_alloc_dma_buffers(struct udevice *dev)
+{
+	struct dwc2_priv *priv = dev_get_priv(dev);
+
+	if (!priv->aligned_buffer) {
+		priv->aligned_buffer = malloc_cache_aligned(DWC2_DATA_BUF_SIZE);
+		if (!priv->aligned_buffer) {
+			dev_err(dev, "Failed to allocate %u-byte DWC2 DMA buffer\n",
+				DWC2_DATA_BUF_SIZE);
+			return -ENOMEM;
+		}
+	}
+
+	if (!priv->status_buffer) {
+		priv->status_buffer = malloc_cache_aligned(DWC2_STATUS_BUF_SIZE);
+		if (!priv->status_buffer) {
+			dev_err(dev, "Failed to allocate %u-byte DWC2 status buffer\n",
+				DWC2_STATUS_BUF_SIZE);
+			free(priv->aligned_buffer);
+			priv->aligned_buffer = NULL;
+			return -ENOMEM;
+		}
+	}
+
+	return 0;
+}
+
+static void dwc2_free_dma_buffers(struct dwc2_priv *priv)
+{
+	if (priv->aligned_buffer) {
+		free(priv->aligned_buffer);
+		priv->aligned_buffer = NULL;
+	}
+
+	if (priv->status_buffer) {
+		free(priv->status_buffer);
+		priv->status_buffer = NULL;
+	}
+}
+
 static int dwc2_usb_probe(struct udevice *dev)
 {
 	struct dwc2_priv *priv = dev_get_priv(dev);
@@ -1424,15 +1764,36 @@ static int dwc2_usb_probe(struct udevice *dev)
 	priv->hnp_srp_disable = true;
 #endif
 
+	if (!priv->use_dma)
+		dev_info(dev, "Using PIO/slave mode\n");
+	else if (priv->bulk_force_pio)
+		dev_info(dev, "Using bulk PIO mode\n");
+	else if (priv->bulk_single_packet)
+		dev_info(dev, "Using single-packet bulk DMA mode\n");
+
 	ret = dwc2_clk_init(dev);
-	if (ret)
+	if (ret) {
+		dev_err(dev, "Failed to enable clocks: %d\n", ret);
 		return ret;
+	}
 
 	ret = dwc2_setup_phy(dev);
+	if (ret) {
+		dev_err(dev, "Failed to setup PHY: %d\n", ret);
+		return ret;
+	}
+
+	ret = dwc2_alloc_dma_buffers(dev);
 	if (ret)
 		return ret;
 
-	return dwc2_init_common(dev, priv);
+	ret = dwc2_init_common(dev, priv);
+	if (ret) {
+		dwc2_free_dma_buffers(priv);
+		return ret;
+	}
+
+	return 0;
 }
 
 static int dwc2_usb_remove(struct udevice *dev)
@@ -1455,6 +1816,26 @@ static int dwc2_usb_remove(struct udevice *dev)
 	reset_release_bulk(&priv->resets);
 	clk_disable_bulk(&priv->clks);
 	clk_release_bulk(&priv->clks);
+	dwc2_free_dma_buffers(priv);
+
+	return 0;
+}
+
+static int dwc2_get_max_xfer_size(struct udevice *dev, size_t *size)
+{
+	struct dwc2_priv *priv = dev_get_priv(dev);
+
+	/*
+	 * Keep Rockchip OTG DMA chunks conservative, but allow larger
+	 * mass-storage commands so the driver can pipeline multiple small
+	 * chunks inside one SCSI transfer.
+	 */
+	if (priv->bulk_force_pio || priv->bulk_single_packet)
+		*size = 512;
+	else if (priv->rockchip_host_params)
+		*size = DWC2_ROCKCHIP_BULK_XFER_SIZE;
+	else
+		*size = 16 * 512;
 
 	return 0;
 }
@@ -1463,6 +1844,7 @@ struct dm_usb_ops dwc2_usb_ops = {
 	.control = dwc2_submit_control_msg,
 	.bulk = dwc2_submit_bulk_msg,
 	.interrupt = dwc2_submit_int_msg,
+	.get_max_xfer_size = dwc2_get_max_xfer_size,
 };
 
 static const struct udevice_id dwc2_usb_ids[] = {
@@ -1481,6 +1863,5 @@ U_BOOT_DRIVER(usb_dwc2) = {
 	.remove = dwc2_usb_remove,
 	.ops	= &dwc2_usb_ops,
 	.priv_auto_alloc_size = sizeof(struct dwc2_priv),
-	.flags	= DM_FLAG_ALLOC_PRIV_DMA,
 };
 #endif

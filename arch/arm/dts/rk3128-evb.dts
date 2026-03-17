@@ -25,7 +25,8 @@
 	vcc5v0_otg: vcc5v0-otg-drv {
 		compatible = "regulator-fixed";
 		regulator-name = "vcc5v0_otg";
-		gpio = <&gpio0 26 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		gpio = <&gpio3 RK_PC1 GPIO_ACTIVE_HIGH>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&otg_vbus_drv>;
 		regulator-min-microvolt = <5000000>;
@@ -61,6 +62,7 @@
 };
 
 &u2phy_otg {
+	vbus-supply = <&vcc5v0_otg>;
 	status = "okay";
 };
 
@@ -83,6 +85,7 @@
 };
 
 &usb_otg {
+	dr_mode = "host";
 	vbus-supply = <&vcc5v0_otg>;
 	status = "okay";
 };
@@ -329,7 +332,8 @@
 
 	usb_otg {
 		otg_vbus_drv: otg-vbus-drv {
-			rockchip,pins = <0 26 RK_FUNC_GPIO &pcfg_pull_none>;
+			rockchip,pins =
+				<RK_GPIO3 RK_PC1 RK_FUNC_GPIO &pcfg_pull_none>;
 		};
 	};
 
