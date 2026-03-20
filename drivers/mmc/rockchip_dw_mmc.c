@@ -14,8 +14,13 @@
 #include <pwrseq.h>
 #include <syscon.h>
 #include <asm/gpio.h>
+#include <asm/io.h>
 #include <asm/arch/clock.h>
+#include <asm/arch/hardware.h>
 #include <asm/arch/periph.h>
+#ifdef CONFIG_ROCKCHIP_RK3128
+#include <asm/arch/grf_rk3128.h>
+#endif
 #include <linux/err.h>
 
 DECLARE_GLOBAL_DATA_PTR;
@@ -49,6 +54,42 @@ struct rockchip_dwmmc_priv {
 	int usrid;
 	u32 minmax[2];
 };
+
+#ifdef CONFIG_ROCKCHIP_RK3128
+static void rk3128_force_sdmmc_1bit_pins(struct dwmci_host *host)
+{
+	struct rk3128_grf * const grf =
+		(struct rk3128_grf * const)0x20008000;
+
+	if ((ulong)host->ioaddr != 0x10214000 || host->buswidth != 1)
+		return;
+
+	/*
+	 * The board DTS requests a 1-bit diagnostic path on CLK/CMD/D0 only.
+	 * Force those muxes here as a narrow RK3128 bring-up aid so we can
+	 * tell whether the remaining CMD51 failure is still coming from the
+	 * generic pinctrl path.
+	 */
+	rk_clrsetreg(&grf->gpio1b_iomux,
+		     GPIO1B7_MASK,
+		     GPIO1B7_MMC0_CMD << GPIO1B7_SHIFT);
+	rk_clrsetreg(&grf->gpio1c_iomux,
+		     GPIO1C0_MASK | GPIO1C2_MASK,
+		     GPIO1C0_MMC0_CLKOUT << GPIO1C0_SHIFT |
+		     GPIO1C2_MMC0_D0 << GPIO1C2_SHIFT);
+
+	/* Match the DTS pull states used by the working kernel tree. */
+	rk_clrsetreg(&grf->gpio1l_pull, BIT(15), 0);
+	rk_clrsetreg(&grf->gpio1h_pull, BIT(0), BIT(0));
+	rk_clrsetreg(&grf->gpio1h_pull, BIT(2), 0);
+
+	printf("[sdmmc] force RK3128 1-bit pins: CMD=GPIO1B7 CLK=GPIO1C0 D0=GPIO1C2\n");
+}
+#else
+static void rk3128_force_sdmmc_1bit_pins(struct dwmci_host *host)
+{
+}
+#endif
 
 static int has_prop(struct udevice *dev, const char *name)
 {
@@ -426,6 +467,7 @@ internal_phase:
 		TX_WMARK(priv->fifo_depth / 2);
 
 	host->fifo_mode = priv->fifo_mode;
+	rk3128_force_sdmmc_1bit_pins(host);
 
 #ifdef CONFIG_ROCKCHIP_RK3128
 	host->stride_pio = true;
@@ -449,15 +491,20 @@ internal_phase:
 	plat->mmc.default_phase =
 		dev_read_u32_default(dev, "default-sample-phase", 0);
 
-	/* Set default sample phase for initializate */
-	if (!(ret < 0)) {
-		if (priv->usrid == USRID_INTER_PHASE)
-			ret = rockchip_mmc_set_phase(host, true, plat->mmc.default_phase);
-		else if ((!priv->sample_clk.dev))
-			ret = clk_set_phase(&priv->sample_clk, plat->mmc.default_phase);
-		if (ret < 0)
-			debug("MMC: can not set default phase!\n");
-	}
+		/*
+		 * Only force an initial sample phase when the DT explicitly asks
+		 * for one.
+		 */
+		if (has_prop(dev, "default-sample-phase") && ret >= 0) {
+			if (priv->usrid == USRID_INTER_PHASE)
+				ret = rockchip_mmc_set_phase(host, true,
+							     plat->mmc.default_phase);
+			else if (priv->sample_clk.dev)
+				ret = clk_set_phase(&priv->sample_clk,
+						    plat->mmc.default_phase);
+			if (ret < 0)
+				debug("MMC: can not set default phase!\n");
+		}
 
 	plat->mmc.init_retry = 0;
 	host->mmc = &plat->mmc;
@@ -465,27 +512,14 @@ internal_phase:
 	host->mmc->dev = dev;
 	upriv->mmc = host->mmc;
 
-	/* Force PWREN only for RK312x SDMMC when no regulators are described */
-	if (device_is_compatible(dev, "rockchip,rk312x-dw-mshc") ||
-	    device_is_compatible(dev, "rockchip,rk3128-dw-mshc")) {
-
-		u32 pwren = dwmci_readl(host, DWMCI_PWREN);
-
-		if (!has_prop(dev, "vmmc-supply") &&
-		    !has_prop(dev, "vqmmc-supply") &&
-		    pwren == 0) {
-
-			printf("[dwmmc] %s: rk312x force PWREN=1 (no vmmc/vqmmc)\n",
-			       dev->name);
-			dwmci_writel(host, DWMCI_PWREN, 1);
-			udelay(1000);
-		}
-	}
-
 	if ((ulong)host->ioaddr == 0x10214000) {
 		u32 ctrl, pwren, clkdiv, clkena, cmd, ctype, status;
 
 		printf("[sdmmc] ioaddr=%p\n", host->ioaddr);
+		printf("[sdmmc] usrid=%08x sample_clk=%s default_phase=%u\n",
+		       priv->usrid,
+		       priv->sample_clk.dev ? "present" : "absent",
+		       plat->mmc.default_phase);
 
 		ctrl   = dwmci_readl(host, DWMCI_CTRL);
 		pwren  = dwmci_readl(host, DWMCI_PWREN);

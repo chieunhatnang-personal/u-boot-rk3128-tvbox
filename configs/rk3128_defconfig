@@ -71,7 +71,6 @@ CONFIG_PWM_ROCKCHIP=y
 CONFIG_RAM=y
 CONFIG_DM_RESET=y
 CONFIG_RKNAND=y
-CONFIG_DEBUG_UART_BASE=0x20068000
 CONFIG_DEBUG_UART_CLOCK=24000000
 CONFIG_DEBUG_UART_SHIFT=2
 CONFIG_SYSRESET=y
@@ -112,3 +111,12 @@ CONFIG_SYS_PROMPT="RK3128 >> "
 CONFIG_CMD_SETEXPR=y
 CONFIG_CMD_ITEST=y
 CONFIG_OF_SPL_REMOVE_PROPS="interrupt-parent"
+CONFIG_DEBUG_UART_BOARD_INIT=y
+# CONFIG_DEBUG_UART_ALWAYS is not set
+# RK3128 uses CONFIG_DEBUG_UART_BOARD_INIT and board_debug_uart_init() for
+# early UART pinmux, before the normal pinctrl / stdout-path flow is active.
+# If this base does not match the desired early UART, U-Boot can still drive
+# the wrong pins even when the DTS enables uart1 and disables uart2. Keep
+# DEBUG_UART_ALWAYS disabled so later console selection follows stdout-path.
+# Set CONFIG_DEBUG_UART_BASE=0x20064000 for uart1, or 0x20068000 for uart2 and that is the most important part of this configuration.
+CONFIG_DEBUG_UART_BASE=0x20064000

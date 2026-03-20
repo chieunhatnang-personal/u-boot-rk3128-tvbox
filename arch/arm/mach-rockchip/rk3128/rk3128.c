@@ -49,23 +49,19 @@ void board_debug_uart_init(void)
 	struct rk3128_grf * const grf __maybe_unused =
 		(struct rk3128_grf * const)0x20008000;
 
-	enum {
-		/* UART2 */
-		GPIO1C2_SHIFT		= 4,
-		GPIO1C2_MASK		= GENMASK(5, 4),
-		GPIO1C2_GPIO		= 0,
-		GPIO1C2_MMC0_D0		= 1,
-		GPIO1C2_UART2_TX	= 2,
-
-		GPIO1C3_SHIFT		= 6,
-		GPIO1C3_MASK		= GENMASK(7, 6),
-		GPIO1C3_GPIO		= 0,
-		GPIO1C2_MMC0_D1		= 1,
-		GPIO1C2_UART2_RX	= 2,
-	};
-
+	/*
+	 * Early debug UART runs before the normal pinctrl / stdout-path flow,
+	 * so select the mux from CONFIG_DEBUG_UART_BASE.
+	 */
+#if defined(CONFIG_DEBUG_UART_BASE) && (CONFIG_DEBUG_UART_BASE == 0x20064000)
+	rk_clrsetreg(&grf->gpio1b_iomux,
+		     GPIO1B1_MASK | GPIO1B2_MASK,
+		     GPIO1B1_UART1_SOUT << GPIO1B1_SHIFT |
+		     GPIO1B2_UART1_SIN << GPIO1B2_SHIFT);
+#else
 	rk_clrsetreg(&grf->gpio1c_iomux,
-		     GPIO1C2_MASK, GPIO1C2_UART2_TX << GPIO1C2_SHIFT);
-	rk_clrsetreg(&grf->gpio1c_iomux,
-		     GPIO1C3_MASK, GPIO1C2_UART2_RX << GPIO1C3_SHIFT);
+		     GPIO1C2_MASK | GPIO1C3_MASK,
+		     GPIO1C2_UART2_TX << GPIO1C2_SHIFT |
+		     GPIO1C3_UART2_RX << GPIO1C3_SHIFT);
+#endif
 }

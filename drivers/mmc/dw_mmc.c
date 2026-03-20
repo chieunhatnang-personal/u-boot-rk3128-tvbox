@@ -31,6 +31,115 @@
  * to augment the groups of {ldm, stm}.
  */
 #define MAX_STRIDE 64
+#define DWMCI_DMA_THRESHOLD 16
+
+static int dwmci_has_prop(struct udevice *dev, const char *name)
+{
+	int len;
+
+	return dev && dev_read_prop(dev, name, &len) != NULL;
+}
+
+static bool dwmci_force_pwren(struct mmc *mmc)
+{
+#if CONFIG_IS_ENABLED(DM_MMC) && defined(CONFIG_ARCH_ROCKCHIP)
+	struct udevice *dev = mmc->dev;
+
+	if (!dev)
+		return false;
+
+	if (!device_is_compatible(dev, "rockchip,rk312x-dw-mshc"))
+		return false;
+
+	/*
+	 * Linux keeps the RK312x SDMMC slot powered even when the board DTS
+	 * omits regulator phandles. U-Boot's Rockchip removable-slot path uses
+	 * CONFIG_MMC_DW_PWREN_VALUE instead, which is 0 in our RK3128 configs
+	 * and drops PWREN again before the first data transfer.
+	 */
+	if (dwmci_has_prop(dev, "vmmc-supply") ||
+	    dwmci_has_prop(dev, "vqmmc-supply"))
+		return false;
+
+	return true;
+#else
+	return false;
+#endif
+}
+
+static bool dwmci_disable_cardthrctl(struct mmc *mmc)
+{
+#if CONFIG_IS_ENABLED(DM_MMC) && defined(CONFIG_ARCH_ROCKCHIP)
+	struct udevice *dev = mmc->dev;
+
+	if (!dev)
+		return false;
+
+	/*
+	 * Linux programs CDTHRCTL dynamically and keeps it disabled during the
+	 * legacy SD startup path. This vendor U-Boot enables a fixed 512-byte
+	 * threshold during init, which is a bad fit for CMD51's 8-byte SCR
+	 * read on RK312x SDMMC.
+	 */
+	return device_is_compatible(dev, "rockchip,rk312x-dw-mshc");
+#else
+	return false;
+#endif
+}
+
+static bool dwmci_has_broken_dto(struct dwmci_host *host)
+{
+#if CONFIG_IS_ENABLED(DM_MMC) && defined(CONFIG_ARCH_ROCKCHIP)
+	struct mmc *mmc = host->mmc;
+	struct udevice *dev;
+
+	if (!mmc)
+		return false;
+
+	dev = mmc->dev;
+	if (!dev)
+		return false;
+
+	/*
+	 * Linux enables BROKEN_DTO on Rockchip DW-MMC because some SoCs can
+	 * complete read transfers without ever surfacing a clean DATA_OVER
+	 * interrupt. Mirror that only for the RK312x SDMMC path we are fixing.
+	 */
+	return device_is_compatible(dev, "rockchip,rk312x-dw-mshc");
+#else
+	return false;
+#endif
+}
+
+static inline u32 dwmci_fifo_count(u32 status)
+{
+	return (status >> DWMCI_FIFO_SHIFT) & DWMCI_FIFO_MASK;
+}
+
+static void dwmci_dump_rk3128_sdmmc_state(struct dwmci_host *host,
+					  struct mmc_cmd *cmd,
+					  const char *reason)
+{
+	if ((ulong)host->ioaddr != 0x10214000)
+		return;
+
+	if (cmd->cmdidx != MMC_CMD_APP_CMD &&
+	    cmd->cmdidx != SD_CMD_APP_SEND_OP_COND &&
+	    cmd->cmdidx != SD_CMD_APP_SEND_SCR)
+		return;
+
+	printf("[sdmmc] CMD%d %s: RINTSTS=%08x STATUS=%08x PWREN=%08x CTYPE=%08x CLKDIV=%08x CLKENA=%08x CMD=%08x RESP0=%08x\n",
+	       cmd->cmdidx, reason,
+	       dwmci_readl(host, DWMCI_RINTSTS),
+	       dwmci_readl(host, DWMCI_STATUS),
+	       dwmci_readl(host, DWMCI_PWREN),
+	       dwmci_readl(host, DWMCI_CTYPE),
+	       dwmci_readl(host, DWMCI_CLKDIV),
+	       dwmci_readl(host, DWMCI_CLKENA),
+	       dwmci_readl(host, DWMCI_CMD),
+	       dwmci_readl(host, DWMCI_RESP0));
+}
+
 #if (CONFIG_ARM && CONFIG_CPU_V7 && !defined(CONFIG_MMC_SIMPLE))
 void noinline dwmci_memcpy_fromio(void *buffer, void *fifo_addr)
 {
@@ -206,6 +315,7 @@ static int dwmci_data_transfer(struct dwmci_host *host, struct mmc_data *data)
 	ulong start = get_timer(0);
 	u32 fifo_depth = (((host->fifoth_val & RX_WMARK_MASK) >>
 			    RX_WMARK_SHIFT) + 1) * 2;
+	bool broken_dto = dwmci_has_broken_dto(host);
 	bool stride;
 
 	size = data->blocksize * data->blocks;
@@ -225,9 +335,21 @@ static int dwmci_data_transfer(struct dwmci_host *host, struct mmc_data *data)
 
 	for (;;) {
 		mask = dwmci_readl(host, DWMCI_RINTSTS);
+		status = dwmci_readl(host, DWMCI_STATUS);
 		/* Error during data transfer. */
 		if (mask & (DWMCI_DATA_ERR | DWMCI_DATA_TOUT)) {
 			debug("%s: DATA ERROR!\n", __func__);
+			if ((ulong)host->ioaddr == 0x10214000) {
+				printf("[sdmmc] data irq: RINTSTS=%08x STATUS=%08x PWREN=%08x CTYPE=%08x CLKDIV=%08x CLKENA=%08x CMD=%08x RESP0=%08x\n",
+				       mask,
+				       status,
+				       dwmci_readl(host, DWMCI_PWREN),
+				       dwmci_readl(host, DWMCI_CTYPE),
+				       dwmci_readl(host, DWMCI_CLKDIV),
+				       dwmci_readl(host, DWMCI_CLKENA),
+				       dwmci_readl(host, DWMCI_CMD),
+				       dwmci_readl(host, DWMCI_RESP0));
+			}
 			/*
 			 * It is necessary to wait for several cycles before
 			 * resetting the controller while data timeout or error.
@@ -257,12 +379,14 @@ static int dwmci_data_transfer(struct dwmci_host *host, struct mmc_data *data)
 		if (host->fifo_mode && size) {
 			len = 0;
 			if (data->flags == MMC_DATA_READ &&
-			    (mask & (DWMCI_INTMSK_RXDR | DWMCI_INTMSK_DTO))) {
+			    ((mask & (DWMCI_INTMSK_RXDR | DWMCI_INTMSK_DTO)) ||
+			     dwmci_fifo_count(status))) {
 				while (size) {
-					len = dwmci_readl(host, DWMCI_STATUS);
-					len = (len >> DWMCI_FIFO_SHIFT) &
-						    DWMCI_FIFO_MASK;
+					len = dwmci_fifo_count(dwmci_readl(host,
+								DWMCI_STATUS));
 					len = min(size, len);
+					if (!len)
+						break;
 					if (!stride) {
 						/* Legacy pio mode */
 						for (i = 0; i < len; i++)
@@ -284,15 +408,15 @@ read_again:
 					size = size > len ? (size - len) : 0;
 				}
 
-				dwmci_writel(host, DWMCI_RINTSTS,
-					     mask & (DWMCI_INTMSK_RXDR | DWMCI_INTMSK_DTO));
+				if (mask & (DWMCI_INTMSK_RXDR | DWMCI_INTMSK_DTO))
+					dwmci_writel(host, DWMCI_RINTSTS,
+						     mask & (DWMCI_INTMSK_RXDR |
+							     DWMCI_INTMSK_DTO));
 			} else if (data->flags == MMC_DATA_WRITE &&
 				   (mask & DWMCI_INTMSK_TXDR)) {
 				while (size) {
-					len = dwmci_readl(host, DWMCI_STATUS);
-					len = fifo_depth - ((len >>
-						   DWMCI_FIFO_SHIFT) &
-						   DWMCI_FIFO_MASK);
+					len = fifo_depth - dwmci_fifo_count(
+						dwmci_readl(host, DWMCI_STATUS));
 					len = min(size, len);
 					if (!stride) {
 						for (i = 0; i < len; i++)
@@ -320,6 +444,20 @@ write_again:
 
 		/* Data arrived correctly. */
 		if (mask & DWMCI_INTMSK_DTO) {
+			ret = 0;
+			break;
+		}
+
+		/*
+		 * Rockchip controllers can drain the FIFO completely for tiny
+		 * reads without ever surfacing DTO. Once every requested word
+		 * has been pulled out and the FIFO stays empty, accept the
+		 * transfer instead of hanging until the generic timeout.
+		 */
+		if (broken_dto && host->fifo_mode && !size &&
+		    data->flags == MMC_DATA_READ && !dwmci_fifo_count(status)) {
+			if ((ulong)host->ioaddr == 0x10214000)
+				printf("[sdmmc] complete read without DTO using empty FIFO fallback\n");
 			ret = 0;
 			break;
 		}
@@ -365,9 +503,11 @@ static int dwmci_send_cmd(struct mmc *mmc, struct mmc_cmd *cmd,
 				 data ? DIV_ROUND_UP(data->blocks, 8) : 0);
 	int ret = 0, flags = 0;
 	unsigned int timeout = 500;
-	u32 mask, ctrl;
+	u32 mask, ctrl, saved_fifoth = 0;
 	ulong start = get_timer(0);
 	struct bounce_buffer bbstate;
+	bool use_fifo_mode = host->fifo_mode;
+	bool small_pio_read = false;
 
 	while (dwmci_readl(host, DWMCI_STATUS) & DWMCI_BUSY) {
 		if (get_timer(start) > timeout) {
@@ -378,8 +518,25 @@ static int dwmci_send_cmd(struct mmc *mmc, struct mmc_cmd *cmd,
 
 	dwmci_writel(host, DWMCI_RINTSTS, DWMCI_INTMSK_ALL);
 
+	if (data && !use_fifo_mode &&
+	    data->blocksize * data->blocks < DWMCI_DMA_THRESHOLD) {
+		use_fifo_mode = true;
+	}
+
+	if (data && use_fifo_mode && data->flags == MMC_DATA_READ &&
+	    data->blocksize * data->blocks <= DWMCI_DMA_THRESHOLD) {
+		small_pio_read = true;
+		saved_fifoth = dwmci_readl(host, DWMCI_FIFOTH);
+		dwmci_writel(host, DWMCI_FIFOTH,
+			     (saved_fifoth & ~RX_WMARK_MASK) | RX_WMARK(0));
+		if ((ulong)host->ioaddr == 0x10214000 &&
+		    cmd->cmdidx == SD_CMD_APP_SEND_SCR)
+			printf("[sdmmc] CMD51 use PIO+low RX watermark for %u-byte transfer\n",
+			       data->blocksize * data->blocks);
+	}
+
 	if (data) {
-		if (host->fifo_mode) {
+		if (use_fifo_mode) {
 			dwmci_writel(host, DWMCI_BLKSIZ, data->blocksize);
 			dwmci_writel(host, DWMCI_BYTCNT,
 				     data->blocksize * data->blocks);
@@ -448,6 +605,9 @@ static int dwmci_send_cmd(struct mmc *mmc, struct mmc_cmd *cmd,
 
 	if (get_timer(start) > timeout) {
 		debug("%s: Timeout.\n", __func__);
+		if (small_pio_read)
+			dwmci_writel(host, DWMCI_FIFOTH, saved_fifoth);
+		dwmci_dump_rk3128_sdmmc_state(host, cmd, "cmd-timeout");
 		return -ETIMEDOUT;
 	}
 
@@ -461,9 +621,15 @@ static int dwmci_send_cmd(struct mmc *mmc, struct mmc_cmd *cmd,
 		 * CMD8, please keep that in mind.
 		 */
 		debug("%s: Response Timeout.\n", __func__);
+		if (small_pio_read)
+			dwmci_writel(host, DWMCI_FIFOTH, saved_fifoth);
+		dwmci_dump_rk3128_sdmmc_state(host, cmd, "resp-timeout");
 		return -ETIMEDOUT;
 	} else if (mask & DWMCI_INTMSK_RE) {
 		debug("%s: Response Error.\n", __func__);
+		if (small_pio_read)
+			dwmci_writel(host, DWMCI_FIFOTH, saved_fifoth);
+		dwmci_dump_rk3128_sdmmc_state(host, cmd, "resp-error");
 		return -EIO;
 	}
 
@@ -480,10 +646,18 @@ static int dwmci_send_cmd(struct mmc *mmc, struct mmc_cmd *cmd,
 	}
 
 	if (data) {
+		bool saved_fifo_mode = host->fifo_mode;
+
+		host->fifo_mode = use_fifo_mode;
 		ret = dwmci_data_transfer(host, data);
+		host->fifo_mode = saved_fifo_mode;
+		if (small_pio_read)
+			dwmci_writel(host, DWMCI_FIFOTH, saved_fifoth);
+		if (ret)
+			dwmci_dump_rk3128_sdmmc_state(host, cmd, "data-error");
 
 		/* only dma mode need it */
-		if (!host->fifo_mode) {
+		if (!use_fifo_mode) {
 			ctrl = dwmci_readl(host, DWMCI_CTRL);
 			ctrl &= ~(DWMCI_DMA_EN);
 			dwmci_writel(host, DWMCI_CTRL, ctrl);
@@ -778,6 +952,9 @@ static int dwmci_init(struct mmc *mmc)
 	struct dwmci_host *host = mmc->priv;
 	uint32_t use_dma;
 	uint32_t verid;
+	u32 cardthrctl = DWMCI_CDTHRCTRL_CONFIG;
+	u32 pwren = 1;
+	bool force_pwren = dwmci_force_pwren(mmc);
 
 #if defined(CONFIG_DM_GPIO) && (defined(CONFIG_SPL_GPIO_SUPPORT) || !defined(CONFIG_SPL_BUILD))
 	struct gpio_desc pwr_en_gpio;
@@ -799,23 +976,44 @@ static int dwmci_init(struct mmc *mmc)
 		host->board_init(host);
 #ifdef CONFIG_ARCH_ROCKCHIP
 	if (host->dev_index == 0)
-		dwmci_writel(host, DWMCI_PWREN, 1);
+		pwren = 1;
 	else if (host->dev_index == 1)
-		dwmci_writel(host, DWMCI_PWREN, CONFIG_MMC_DW_PWREN_VALUE);
+		pwren = CONFIG_MMC_DW_PWREN_VALUE;
 	else
-		dwmci_writel(host, DWMCI_PWREN, 1);
+		pwren = 1;
 #else
-	dwmci_writel(host, DWMCI_PWREN, 1);
+	pwren = 1;
 #endif
 
+	if (force_pwren) {
+		pwren = 1;
+#if CONFIG_IS_ENABLED(DM_MMC)
+		printf("[dwmmc] %s: keep PWREN=1 for rk312x sdmmc (no vmmc/vqmmc)\n",
+		       mmc->dev->name);
+#endif
+	}
+
+	dwmci_writel(host, DWMCI_PWREN, pwren);
+
 	verid = dwmci_readl(host, DWMCI_VERID) & 0x0000ffff;
-	if (verid >= DW_MMC_240A)
-		dwmci_writel(host, DWMCI_CARDTHRCTL, DWMCI_CDTHRCTRL_CONFIG);
+	if (dwmci_disable_cardthrctl(mmc))
+		cardthrctl = 0;
+
+	if (verid >= DW_MMC_240A) {
+		dwmci_writel(host, DWMCI_CARDTHRCTL, cardthrctl);
+#if CONFIG_IS_ENABLED(DM_MMC)
+		if (!cardthrctl && (ulong)host->ioaddr == 0x10214000)
+			printf("[sdmmc] disable CARDTHRCTL for rk312x legacy reads\n");
+#endif
+	}
 
 	if (!dwmci_wait_reset(host, DWMCI_RESET_ALL)) {
 		debug("%s[%d] Fail-reset!!\n", __func__, __LINE__);
 		return -EIO;
 	}
+
+	if (force_pwren)
+		dwmci_writel(host, DWMCI_PWREN, pwren);
 
 	use_dma = SDMMC_GET_TRANS_MODE(dwmci_readl(host, DWMCI_HCON));
 	if (use_dma == DMA_INTERFACE_IDMA) {

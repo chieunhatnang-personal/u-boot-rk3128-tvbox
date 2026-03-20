@@ -70,8 +70,12 @@
 	status = "okay";
 };
 
-&uart2 {
+&uart1 {
 	status = "okay";
+};
+
+&uart2 {
+	status = "disabled";
 };
 
 &usb_host_ehci {
@@ -91,13 +95,13 @@
 };
 
 &sdmmc {
-    status = "okay";
-    bus-width = <4>;
-    disable-wp;
-    /* if no CD pin exists: */
-    broken-cd;
-    /* or sometimes: non-removable; (depends on driver expectations) */
-	pinctrl-0 = <&sdmmc_bus4>;
+	status = "okay";
+	bus-width = <1>;
+	disable-wp;
+	/* if no CD pin exists: */
+	broken-cd;
+	/* 1-bit test path: CLK/CMD/D0 only. */
+	pinctrl-0 = <&sdmmc_clk &sdmmc_cmd &sdmmc_bus1>;
 };
 
 &emmc {
@@ -342,4 +346,10 @@
 			rockchip,pins = <2 23 RK_FUNC_GPIO &pcfg_pull_none>;
 		};
 	};
-};
+
+	sdmmc_test {
+		sdmmc_bus1: sdmmc-bus1 {
+			rockchip,pins = <1 RK_PC2 1 &pcfg_pull_default>;
+		};
+	};
+	};

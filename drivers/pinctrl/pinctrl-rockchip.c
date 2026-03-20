@@ -394,6 +394,7 @@ struct rockchip_pin_ctrl {
 struct rockchip_pinctrl_priv {
 	struct rockchip_pin_ctrl	*ctrl;
 	struct regmap			*regmap_base;
+	struct regmap			*regmap_mux;
 	struct regmap			*regmap_pmu;
 
 };
@@ -415,6 +416,11 @@ static int rockchip_verify_config(struct udevice *dev, u32 bank, u32 pin)
 	}
 
 	return 0;
+}
+
+static struct regmap *rockchip_get_mux_regmap(struct rockchip_pinctrl_priv *priv)
+{
+	return priv->regmap_mux ? priv->regmap_mux : priv->regmap_base;
 }
 
 static struct rockchip_mux_recalced_data rv1108_mux_recalced_data[] = {
@@ -1648,9 +1654,10 @@ static int rockchip_get_mux(struct rockchip_pin_bank *bank, int pin)
 	if (bank->iomux[iomux_num].type & IOMUX_SOURCE_PMU)
 		regmap = priv->regmap_pmu;
 	else if (bank->iomux[iomux_num].type & IOMUX_L_SOURCE_PMU)
-		regmap = (pin % 8 < 4) ? priv->regmap_pmu : priv->regmap_base;
+		regmap = (pin % 8 < 4) ? priv->regmap_pmu :
+			 rockchip_get_mux_regmap(priv);
 	else
-		regmap = priv->regmap_base;
+		regmap = rockchip_get_mux_regmap(priv);
 
 	/* get basic quadrupel of mux registers and the correct reg inside */
 	mux_type = bank->iomux[iomux_num].type;
@@ -1745,9 +1752,10 @@ static int rockchip_set_mux(struct rockchip_pin_bank *bank, int pin, int mux)
 	if (bank->iomux[iomux_num].type & IOMUX_SOURCE_PMU)
 		regmap = priv->regmap_pmu;
 	else if (bank->iomux[iomux_num].type & IOMUX_L_SOURCE_PMU)
-		regmap = (pin % 8 < 4) ? priv->regmap_pmu : priv->regmap_base;
+		regmap = (pin % 8 < 4) ? priv->regmap_pmu :
+			 rockchip_get_mux_regmap(priv);
 	else
-		regmap = priv->regmap_base;
+		regmap = rockchip_get_mux_regmap(priv);
 
 	/* get basic quadrupel of mux registers and the correct reg inside */
 	mux_type = bank->iomux[iomux_num].type;
@@ -1777,7 +1785,7 @@ static int rockchip_set_mux(struct rockchip_pin_bank *bank, int pin, int mux)
 					     &route_reg, &route_val);
 		switch (ret) {
 		case ROUTE_TYPE_DEFAULT:
-			regmap_write(regmap, route_reg, route_val);
+			regmap_write(priv->regmap_base, route_reg, route_val);
 			break;
 		case ROUTE_TYPE_TOPGRF:
 			regmap_write(priv->regmap_base, route_reg, route_val);
@@ -3271,16 +3279,16 @@ static int rockchip_pinctrl_probe(struct udevice *dev)
 		return -ENODEV;
 	}
 
-	/*
-	 * In THIS vendor tree, rockchip_set_mux() uses priv->regmap_base.
-	 * For RK3128, iomux registers are at pinctrl reg index 1 ("mux"),
-	 * so repoint regmap_base there to avoid the bus hang.
-	 */
 	priv->regmap_base = regmap;
 
 #ifdef CONFIG_ROCKCHIP_RK3128
 	{
-		/* reg index 1 == "mux" in your DT */
+		/*
+		 * RK3128 splits mux/pull/drive into separate register windows.
+		 * Keep regmap_base on the GRF base window so pull writes land at
+		 * the correct offsets, and use a dedicated mux regmap for
+		 * IOMUX writes.
+		 */
 		fdt_addr_t mux_base = dev_read_addr_index(dev, 1);
 		if (mux_base != FDT_ADDR_T_NONE) {
 			static struct regmap mux_map;
@@ -3288,9 +3296,9 @@ static int rockchip_pinctrl_probe(struct udevice *dev)
 			mux_map = *regmap;   /* clone regmap ops */
 			mux_map.base = mux_base;
 
-			priv->regmap_base = &mux_map;
+			priv->regmap_mux = &mux_map;
 
-			printf("[rk_pinctrl] RK3128 override regmap_base -> 0x%08llx\n",
+			printf("[rk_pinctrl] RK3128 mux regmap -> 0x%08llx\n",
 			       (unsigned long long)mux_base);
 		}
 	}

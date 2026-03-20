@@ -11,7 +11,7 @@
 	};
 
 	chosen {
-		stdout-path = &uart2;
+		stdout-path = &uart1;
 	};
 };
 
@@ -100,7 +100,7 @@
 
 
 &sdmmc {
+	default-sample-phase = <0>;
 	u-boot,dm-pre-reloc;
 	status = "okay";
 };
-

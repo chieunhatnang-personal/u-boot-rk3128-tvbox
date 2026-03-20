@@ -1545,12 +1545,15 @@ static int sd_change_freq(struct mmc *mmc)
 		return 0;
 
 	/* Read the SCR to find out if this card supports higher speeds */
+
+	timeout = 3;
+
+retry_scr:
 	cmd.cmdidx = MMC_CMD_APP_CMD;
 	cmd.resp_type = MMC_RSP_R1;
 	cmd.cmdarg = mmc->rca << 16;
 
 	err = mmc_send_cmd(mmc, &cmd, NULL);
-
 	if (err)
 		return err;
 
@@ -1558,9 +1561,6 @@ static int sd_change_freq(struct mmc *mmc)
 	cmd.resp_type = MMC_RSP_R1;
 	cmd.cmdarg = 0;
 
-	timeout = 3;
-
-retry_scr:
 	data.dest = (char *)scr;
 	data.blocksize = 8;
 	data.blocks = 1;
