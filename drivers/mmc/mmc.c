@@ -2501,7 +2501,7 @@ int mmc_set_bkops_enable(struct mmc *mmc)
 }
 #endif
 
-// [CNN modded] Add mmcdump command
+// ========= CNN modded ========= Add mmcdump command
 static void mmc_dump_dwmmc_regs(ulong base)
 {
 #define R(off) readl((void *)(base + (off)))
@@ -2531,6 +2531,6 @@ static int do_mmcdump(cmd_tbl_t *cmdtp, int flag, int argc, char *const argv[])
 
 U_BOOT_CMD(
 	mmcdump, 1, 1, do_mmcdump,
-	"[CNN Modded]dump DWMMC regs for rk3128 (sdmmc/emmc)",
+	"========= CNN modded ========= Dump DWMMC regs for rk3128 (sdmmc/emmc)",
 	""
 );

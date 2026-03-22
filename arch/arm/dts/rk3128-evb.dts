@@ -78,6 +78,10 @@
 	status = "disabled";
 };
 
+&saradc {
+	status = "okay";
+};
+
 &usb_host_ehci {
 	vbus-supply = <&vcc5v0_host>;
 	status = "okay";
