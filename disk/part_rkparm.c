@@ -6,6 +6,7 @@
 
 #include <common.h>
 #include <malloc.h>
+#include <linux/ctype.h>
 #ifdef CONFIG_ROCKCHIP_PRELOADER_ATAGS
 #include <asm/arch/rk_atags.h>
 #endif
@@ -39,6 +40,43 @@ static LIST_HEAD(parts_head);
  */
 static int dev_num = -1;
 
+static void rkparm_export_part_env(const char *cmdline, const char *token,
+				   const char *varname, bool strip_token)
+{
+	const char *part_env;
+	const unsigned char *src;
+	char *dst;
+	char *buf;
+	int len;
+
+	part_env = strstr(cmdline, token);
+	if (!part_env)
+		return;
+	if (strip_token)
+		part_env += strlen(token);
+
+	len = 0;
+	for (src = (const unsigned char *)part_env; *src && !isspace(*src); src++) {
+		if (isprint(*src))
+			len++;
+	}
+	if (!len)
+		return;
+
+	buf = calloc(1, len + 1);
+	if (!buf)
+		return;
+
+	for (src = (const unsigned char *)part_env, dst = buf;
+	     *src && !isspace(*src); src++) {
+		if (isprint(*src))
+			*dst++ = *src;
+	}
+
+	env_set(varname, buf);
+	free(buf);
+}
+
 static int rkparm_param_parse(char *param, struct list_head *parts_head,
 			      struct blk_desc *dev_desc)
 {
@@ -55,15 +93,22 @@ static int rkparm_param_parse(char *param, struct list_head *parts_head,
 	}
 
 	blkdev_parts = strstr(cmdline, "mtdparts");
+	if (!blkdev_parts) {
+		debug("RKPARM: No mtdparts in parameter cmdline\n");
+		return -EINVAL;
+	}
 	next = strchr(blkdev_parts, ':');
 	cmdline_end = strstr(cmdline, "\n"); /* end by '\n' */
-	*cmdline_end = '\0';
+	if (cmdline_end)
+		*cmdline_end = '\0';
 	/*
 	 * 1. skip "CMDLINE:"
 	 * 2. Initrd fixup: remove unused "initrd=0x...,0x...", this for
 	 *    compatible with legacy parameter.txt
 	 */
 	env_update_filter("bootargs", cmdline + strlen("CMDLINE:"), "initrd=");
+	rkparm_export_part_env(cmdline, "mtdparts=", "mtdparts", true);
+	rkparm_export_part_env(cmdline, "blkdevparts=", "blkdevparts", true);
 
 	INIT_LIST_HEAD(parts_head);
 	while (next) {
