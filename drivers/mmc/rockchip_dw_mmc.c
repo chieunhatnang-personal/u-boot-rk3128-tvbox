@@ -20,6 +20,7 @@
 #include <asm/arch/periph.h>
 #ifdef CONFIG_ROCKCHIP_RK3128
 #include <asm/arch/grf_rk3128.h>
+#include <asm/arch/rk3128_storage.h>
 #endif
 #include <linux/err.h>
 
@@ -56,12 +57,28 @@ struct rockchip_dwmmc_priv {
 };
 
 #ifdef CONFIG_ROCKCHIP_RK3128
+#define RK3128_SDMMC_BASE	0x10214000
+#define RK3128_EMMC_BASE	0x1021c000
+
+static bool rk3128_dwmmc_is_emmc(struct dwmci_host *host)
+{
+	return (ulong)host->ioaddr == RK3128_EMMC_BASE;
+}
+
+static bool rk3128_skip_emmc_probe(struct dwmci_host *host)
+{
+	if (!rk3128_dwmmc_is_emmc(host))
+		return false;
+
+	return rk3128_nand_is_present();
+}
+
 static void rk3128_force_sdmmc_1bit_pins(struct dwmci_host *host)
 {
 	struct rk3128_grf * const grf =
 		(struct rk3128_grf * const)0x20008000;
 
-	if ((ulong)host->ioaddr != 0x10214000 || host->buswidth != 1)
+	if ((ulong)host->ioaddr != RK3128_SDMMC_BASE || host->buswidth != 1)
 		return;
 
 	/*
@@ -86,6 +103,16 @@ static void rk3128_force_sdmmc_1bit_pins(struct dwmci_host *host)
 	printf("[sdmmc] force RK3128 1-bit pins: CMD=GPIO1B7 CLK=GPIO1C0 D0=GPIO1C2\n");
 }
 #else
+static bool rk3128_dwmmc_is_emmc(struct dwmci_host *host)
+{
+	return false;
+}
+
+static bool rk3128_skip_emmc_probe(struct dwmci_host *host)
+{
+	return false;
+}
+
 static void rk3128_force_sdmmc_1bit_pins(struct dwmci_host *host)
 {
 }
@@ -150,8 +177,12 @@ static int rockchip_dwmmc_ofdata_to_platdata(struct udevice *dev)
 	host->get_mmc_clk = rockchip_dwmmc_get_mmc_clk;
 	host->priv = dev;
 
-	/* use non-removeable as sdcard and emmc as judgement */
-	if (dev_read_bool(dev, "non-removable"))
+	/*
+	 * Older RK3128 board files in this tree may miss "non-removable" on
+	 * the eMMC node. Keep the devnum stable by treating the fixed eMMC
+	 * controller address as mmc0 as well.
+	 */
+	if (dev_read_bool(dev, "non-removable") || rk3128_dwmmc_is_emmc(host))
 		host->dev_index = 0;
 	else
 		host->dev_index = 1;
@@ -466,7 +497,14 @@ internal_phase:
 		RX_WMARK(priv->fifo_depth / 2 - 1) |
 		TX_WMARK(priv->fifo_depth / 2);
 
+	if (rk3128_skip_emmc_probe(host))
+		return -ENODEV;
+
 	host->fifo_mode = priv->fifo_mode;
+
+	if (rk3128_dwmmc_is_emmc(host))
+		rk3128_configure_emmc_pins();
+
 	rk3128_force_sdmmc_1bit_pins(host);
 
 #ifdef CONFIG_ROCKCHIP_RK3128

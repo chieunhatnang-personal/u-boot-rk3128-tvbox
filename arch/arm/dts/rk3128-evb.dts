@@ -110,6 +110,8 @@
 
 &emmc {
 	fifo-mode;
+	disable-wp;
+	non-removable;
 	status = "okay";
 };
 

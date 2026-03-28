@@ -5,12 +5,22 @@
  */
 
 #include <common.h>
+#include <asm/arch/rk3128_storage.h>
 #include <asm/arch/vendor.h>
 #include <dm.h>
 #include <dm/device-internal.h>
 #include <dm/lists.h>
 #include <dm/root.h>
 #include "rknand.h"
+
+static bool rk3128_skip_nand_probe(void)
+{
+#ifdef CONFIG_ROCKCHIP_RK3128
+	return !rk3128_nand_is_present();
+#else
+	return false;
+#endif
+}
 
 struct blk_desc *rknand_get_blk_desc(struct rknand_dev *ndev)
 {
@@ -184,6 +194,13 @@ static int rockchip_nand_probe(struct udevice *udev)
 	int ret;
 	struct rknand_dev *ndev = dev_get_priv(udev);
 
+	if (rk3128_skip_nand_probe())
+		return -ENODEV;
+
+#ifdef CONFIG_ROCKCHIP_RK3128
+	rk3128_configure_nand_pins();
+#endif
+
 	ndev->ioaddr = dev_read_addr_ptr(udev);
 	ret = rk_ftl_init(ndev->ioaddr);
 	if (!ret) {
@@ -235,4 +252,3 @@ U_BOOT_DRIVER(rknand) = {
 	.probe		= rockchip_nand_probe,
 	.priv_auto_alloc_size = sizeof(struct rknand_dev),
 };
-

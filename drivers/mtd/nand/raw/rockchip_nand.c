@@ -6,6 +6,7 @@
  */
 
 #include <common.h>
+#include <asm/arch/rk3128_storage.h>
 #include <dm.h>
 #include <fdtdec.h>
 #include <inttypes.h>
@@ -18,6 +19,15 @@
 #include <linux/mtd/partitions.h>
 
 DECLARE_GLOBAL_DATA_PTR;
+
+static bool rk3128_skip_nand_probe(void)
+{
+#ifdef CONFIG_ROCKCHIP_RK3128
+	return !rk3128_nand_is_present();
+#else
+	return false;
+#endif
+}
 
 #define NANDC_V6_BOOTROM_ECC	24
 #define	NANDC_V6_NUM_BANKS	8
@@ -662,9 +672,15 @@ static int rockchip_nandc_probe(struct udevice *dev)
 	fdt_addr_t regs;
 	int ret = 0, node;
 
+	if (rk3128_skip_nand_probe())
+		return -ENODEV;
+
 	node = fdtdec_next_compatible(blob, 0, COMPAT_ROCKCHIP_NANDC);
 
 	rknand->dev = dev;
+#ifdef CONFIG_ROCKCHIP_RK3128
+	rk3128_configure_nand_pins();
+#endif
 
 	regs = dev_read_addr(dev);
 	if (regs == FDT_ADDR_T_NONE) {

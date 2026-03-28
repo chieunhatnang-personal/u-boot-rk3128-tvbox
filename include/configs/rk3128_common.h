@@ -65,6 +65,20 @@
 	"ramdisk_addr_r=0x6a200000\0"
 
 #include <config_distro_bootcmd.h>
+
+/*
+ * Android-style RK3128 eMMC layouts often place the bootable filesystem on a
+ * non-bootable GPT partition, so the generic distro MMC helper stops too
+ * early. Scan all MMC partitions here, matching the existing rknand flow.
+ */
+#undef BOOTENV_SHARED_MMC
+#define BOOTENV_SHARED_MMC \
+	"mmc_boot=" \
+		"if mmc dev ${devnum}; then " \
+			"setenv devtype mmc; " \
+			"run scan_dev_for_boot_part_no_check_bootable_flag; " \
+		"fi\0"
+
 #define CONFIG_EXTRA_ENV_SETTINGS \
 	ENV_MEM_LAYOUT_SETTINGS \
 	ENV_MEM_LAYOUT_SETTINGS1 \
